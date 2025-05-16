@@ -105,18 +105,17 @@ class SQLQueryInspector:
                     self.issues.append(f"Potentially unsafe SQL pattern '{actual_keyword}' detected.")
         
         if re.search(r'\b(LIMIT|OFFSET)\b', self.query, re.IGNORECASE) and \
-           not re.search(r'\bORDER\s+BY\b', self.query, re.IGNORECASE):
+            not re.search(r'\bORDER\s+BY\b', self.query, re.IGNORECASE):
             self.issues.append("Use of LIMIT/OFFSET without ORDER BY may result in unpredictable results.")
 
         if re.search(r';(?!\s*(--.*)?$)', self.query.strip()):
             is_already_flagged_as_unsafe_semicolon_comment = False
             for issue in self.issues:
-                if ';\s*--' in issue and "Potentially unsafe SQL pattern" in issue:
+                if ';\s*--' in issue and "Potentially unsafe SQL pattern" in issue: 
                     is_already_flagged_as_unsafe_semicolon_comment = True
                     break
             if not is_already_flagged_as_unsafe_semicolon_comment:
-                 self.issues.append("Avoid the use of semicolons (;) except possibly at the very end of the query.")
-
+                    self.issues.append("Avoid the use of semicolons (;) except possibly at the very end of the query.")
 
         join_pattern = r'\bJOIN\s+([\w.]+)(\s+\w+)?(?!\s+(ON|USING)\b)'
         potential_cartesian_joins = re.findall(join_pattern, self.query, re.IGNORECASE)
@@ -144,8 +143,8 @@ agg_pattern = re.compile(r'^(COUNT|SUM|AVG|MIN|MAX)\s*\(\s*(?:\*|\w+|\bDISTINCT\
 def check_and_clean_columns(columns_raw, ctes_present, known_base_table_aliases, known_base_table_names):
     cleaned_columns_for_validation = []
     known_prefixes = known_base_table_aliases.union(known_base_table_names)
-    for col_raw_item in columns_raw:
-        col_raw = str(col_raw_item)
+    for col_raw_item in columns_raw: 
+        col_raw = str(col_raw_item) 
         if agg_pattern.match(col_raw):
             continue
         if ctes_present:
@@ -203,20 +202,20 @@ def query_validator(query: str, current_schema_mapping: Dict[str, List[str]]) ->
         try:
             parser = Parser(query)
             tables_from_parser_for_simple_check = [str(t).lower() for t in parser.tables]
-            columns_raw = parser.columns
+            columns_raw = parser.columns 
             ctes_present = bool(parser.with_names)
 
             if not tables_from_parser_for_simple_check and not ctes_present:
-                is_simple_select_ok = True
+                is_simple_select_ok = True 
                 if columns_raw:
                     for c_item in columns_raw:
-                        c = str(c_item)
+                        c = str(c_item) 
                         if not (c.isdigit() or c == '*' or agg_pattern.match(c) or 
-                                re.match(r'^\w+\(\s*\)$', c)):
+                                re.match(r'^\w+\(\s*\)$', c)): 
                             is_simple_select_ok = False
                             break
                 if is_simple_select_ok:
-                    return query
+                    return query 
                 else:
                     return "Validation Error: Columns specified without a valid table or CTE reference."
 
@@ -311,7 +310,7 @@ Based on the following task description and evaluation criteria, evaluate the pr
 Provide detailed reasoning for each criterion. Assign an overall score (0-10 integer or 0.0-1.0 float).
 Return JSON: {{"score": <score>, "reason": "<detailed reasoning>"}}"""
     def __init__(self, task_introduction: str, evaluation_criteria: str, judge_model_id: str):
-        super().__init__(name="sql_relevancy_score", judge_model_id=judge_model_id, prompt_template=self.PROMPT_TEMPLATE)
+        super().__init__(name="LLM-based SQL Evaluation (GEval)", judge_model_id=judge_model_id, prompt_template=self.PROMPT_TEMPLATE)
         self._task_introduction = task_introduction; self._evaluation_criteria = evaluation_criteria
     def _format_prompt(self, output: str, **ignored_kwargs) -> str:
         return self.prompt_template.format(task_introduction=self._task_introduction, evaluation_criteria=self._evaluation_criteria, output=output)
@@ -339,26 +338,51 @@ def txt2sql_metrics(user_question: str, predicted_sql: str, db_schema: str) -> s
     else:
         print(f"   INFO: DB Schema DDL parsed. Known tables for validator: {list(table_definitions_from_ddl.keys())}")
 
-    print("2. Performing Comprehensive SQL Validation (Strict Dynamic Schema)...")
+    print("2. Performing SQL Safety and Column Hallucination Checks...")
     validation_result_str = query_validator(predicted_sql, table_definitions_from_ddl)
 
-    validation_score = 0.0 
-    validation_reason = "Pass (Comprehensive Validation)"
-    
-    if validation_result_str != predicted_sql: 
-        validation_score = 1.0 
-        validation_reason = validation_result_str 
+    sql_safety_score = 0 # 0 means safe
+    sql_safety_score_reasoning = "it is safe"
+    sql_column_hallucination = 0 # 0 means not hallucinated
+    sql_column_hallucination_reasoning = "not hallucinated"
 
-    comprehensive_validation_metric = CustomScoreResult(
-        name="sql_safety_score", 
-        score=validation_score,
-        reason=validation_reason,
-        metadata={"raw_validator_output": validation_result_str} 
-    )
-    results_list.append(comprehensive_validation_metric.to_dict())
-    print(f"   Comprehensive SQL Validation Score: {validation_score}, Reason (first 100 chars): {validation_reason[:100]}...")
+    if validation_result_str != predicted_sql:
+        safety_issue_markers = [
+            "Only SELECT statements or CTEs are allowed",
+            "Potential disallowed operation detected",
+            "Potentially unsafe SQL pattern",
+            "Avoid the use of semicolons (;)",
+            "Use of LIMIT/OFFSET without ORDER BY",
+            "Use of JOIN without an ON/USING clause",
+            "UNION queries detected"
+        ]
+        is_safety_issue_found = False
+        for marker in safety_issue_markers:
+            if marker in validation_result_str:
+                sql_safety_score = 1 # 1 means unsafe
+                sql_safety_score_reasoning = validation_result_str
+                is_safety_issue_found = True
+                break
+        
+        if not is_safety_issue_found:
+            sql_column_hallucination = 1 # 1 means hallucinated
+            sql_column_hallucination_reasoning = validation_result_str
 
-    print("3. Running LLM-based SQL Evaluation (GEval)...")
+    results_list.append({
+        "name": "sql_safety_score",
+        "score": sql_safety_score,
+        "reason": sql_safety_score_reasoning
+    })
+    print(f"   SQL Safety Score: {sql_safety_score}, Reasoning: {sql_safety_score_reasoning[:100]}...")
+
+    results_list.append({
+        "name": "sql_column_hallucination",
+        "score": sql_column_hallucination,
+        "reason": sql_column_hallucination_reasoning
+    })
+    print(f"   SQL Column Hallucination Score: {sql_column_hallucination}, Reasoning: {sql_column_hallucination_reasoning[:100]}...")
+
+    print("3. Running LLM-based SQL Evaluation (GEval) for Relevancy...")
     geval_task_intro = (f"Evaluate the SQL query for accuracy, completeness, and adherence to standard practices, considering the User Question and Database Schema.\nUser Question: \"{user_question}\"\nDatabase Schema (CREATE TABLE statements):\n{db_schema}")
     geval_criteria = """
 Please assess based on:
@@ -374,16 +398,13 @@ Return a 0-10 score and detailed reasoning.
 """
     geval_metric = CustomGEval(task_introduction=geval_task_intro, evaluation_criteria=geval_criteria, judge_model_id=JUDGE_MODEL_ID)
     geval_result = geval_metric.score(output=predicted_sql)
-    results_list.append(geval_result.to_dict())
-    print(f"   G-Eval Score: {geval_result.score}, Reason (first 100 chars): {str(geval_result.reason)[:100]}...")
-
-    column_hallucination_metric = CustomScoreResult(
-        name="sql_column_hallucination_score",
-        score=validation_score,
-        reason=validation_reason,
-        metadata={"raw_validator_output": validation_result_str}
-    )
-    results_list.append(column_hallucination_metric.to_dict())
+    
+    results_list.append({
+        "name": "sql_relevancy_score",
+        "score": geval_result.score,
+        "reason": geval_result.reason
+    })
+    print(f"   SQL Relevancy Score: {geval_result.score}, Reasoning: {str(geval_result.reason)[:100]}...")
 
     print("--- Evaluation Complete ---")
     return json.dumps(results_list, indent=2)
@@ -541,20 +562,27 @@ if __name__ == '__main__':
         }
         
         for metric in metrics_list:
-            metric_name = metric['name'].lower()
-            row_results[f"{metric_name}"] = metric.get('score')
-            row_results[f"{metric_name}_reasoning"] = metric.get('reason', "No reason provided")[:100] + "..."
+            metric_name_key = metric['name']
+            if metric_name_key == "sql_safety_score":
+                row_results['sql_safety_score'] = metric.get('score')
+                row_results['sql_safety_score_reasoning'] = metric.get('reason')
+            elif metric_name_key == "sql_column_hallucination":
+                row_results['sql_column_hallucination'] = metric.get('score')
+                row_results['sql_column_hallucination_reasoning'] = metric.get('reason')
+            elif metric_name_key == "sql_relevancy_score":
+                row_results['sql_relevancy_score'] = metric.get('score')
+                row_results['relevancy_reasoning'] = metric.get('reason')
         
         results_data.append(row_results)
         
         print(f"  SQL: {row['sql']}")
-        for metric in metrics_list:
-            print(f"  {metric['name']}: {metric.get('score')} - {metric.get('reason', 'No reason')[:80]}...")
-        
-    print("\n--- Evaluation Summary ---")
-    print(f"{'ID':<8} {'Use Case':<25} {'Valid?':<10} {'Score':<10}")
-    print("-" * 55)
-    for result in results_data:
-        valid = "No" if result.get('sql_safety_score', 0) > 0 else "Yes"
-        relevancy_score = result.get('sql_relevancy_score', 'N/A')
-        print(f"{result['test_id']:<8} {result['use_case'][:25]:<25} {valid:<10} {relevancy_score:<10}")
+        for metric_item in metrics_list:
+            print(f"  {metric_item['name']}: {metric_item.get('score')} - {str(metric_item.get('reason', 'No reason'))[:80]}...")
+            
+    df_results = pd.DataFrame(results_data)
+    print("\n--- Final Results DataFrame ---")
+    print(df_results.to_string())
+    
+    csv_filename = "evaluation_results.csv"
+    df_results.to_csv(csv_filename, index=False)
+    print(f"\nResults saved to {csv_filename}")
